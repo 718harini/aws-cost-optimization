@@ -1,17 +1,31 @@
 import boto3
 import json
+import os
+
 from datetime import datetime, timezone, timedelta
+from botocore.exceptions import ClientError, BotoCoreError
+
 
 # ==========================================
-# AWS CONFIGURATION
+# 1. AWS CONFIGURATION
 # ==========================================
 
-REGION = "us-east-1"
+REGION = os.getenv("AWS_DEFAULT_REGION", "us-east-1")
+
 CPU_THRESHOLD = 10
 MIN_CPU_DATAPOINTS = 3
+CPU_ANALYSIS_DAYS = 7
+CPU_METRIC_PERIOD = 86400
 
-ec2 = boto3.client("ec2", region_name=REGION)
-cloudwatch = boto3.client("cloudwatch", region_name=REGION)
+session = boto3.Session(region_name=REGION)
+
+ec2 = session.client("ec2")
+cloudwatch = session.client("cloudwatch")
+
+
+# ==========================================
+# 2. DATA COLLECTION
+# ==========================================
 
 instances = []
 volumes = []
@@ -21,262 +35,425 @@ findings = []
 
 
 # ==========================================
-# 1. EC2 RESOURCE AUDIT
+# 3. EC2 RESOURCE AUDIT
 # ==========================================
 
-paginator = ec2.get_paginator("describe_instances")
+def audit_ec2():
 
-for page in paginator.paginate():
+    print("\nStarting EC2 audit...")
 
-    for reservation in page["Reservations"]:
+    paginator = ec2.get_paginator("describe_instances")
 
-        for instance in reservation["Instances"]:
+    for page in paginator.paginate():
 
-            state = instance["State"]["Name"]
-            instance_id = instance["InstanceId"]
+        for reservation in page["Reservations"]:
 
-            instances.append({
-                "InstanceId": instance_id,
-                "InstanceType": instance["InstanceType"],
+            for instance in reservation["Instances"]:
+
+                state = instance["State"]["Name"]
+                instance_id = instance["InstanceId"]
+
+                instances.append({
+                    "InstanceId": instance_id,
+                    "InstanceType": instance["InstanceType"],
+                    "State": state
+                })
+
+                if state == "stopped":
+
+                    findings.append({
+                        "Resource": instance_id,
+                        "Type": "EC2",
+                        "Issue": "Stopped instance",
+                        "Recommendation": (
+                            "Review whether this instance is still required."
+                        )
+                    })
+
+    print(f"EC2 instances discovered: {len(instances)}")
+
+
+# ==========================================
+# 4. EBS VOLUME AUDIT
+# ==========================================
+
+def audit_ebs():
+
+    print("\nStarting EBS audit...")
+
+    paginator = ec2.get_paginator("describe_volumes")
+
+    for page in paginator.paginate():
+
+        for volume in page["Volumes"]:
+
+            state = volume["State"]
+
+            volumes.append({
+                "VolumeId": volume["VolumeId"],
+                "SizeGB": volume["Size"],
                 "State": state
             })
 
-            if state == "stopped":
+            if state == "available":
 
                 findings.append({
-                    "Resource": instance_id,
-                    "Type": "EC2",
-                    "Issue": "Stopped instance",
-                    "Recommendation": "Review whether this instance is still required."
+                    "Resource": volume["VolumeId"],
+                    "Type": "EBS",
+                    "Issue": "Unattached volume",
+                    "Recommendation": (
+                        "Verify its data and ownership before considering deletion."
+                    )
                 })
 
+    print(f"EBS volumes discovered: {len(volumes)}")
+
 
 # ==========================================
-# 2. EBS VOLUME AUDIT
+# 5. ELASTIC IP AUDIT
 # ==========================================
 
-paginator = ec2.get_paginator("describe_volumes")
+def audit_elastic_ips():
 
-for page in paginator.paginate():
+    print("\nStarting Elastic IP audit...")
 
-    for volume in page["Volumes"]:
+    paginator = ec2.get_paginator("describe_addresses")
 
-        state = volume["State"]
+    for page in paginator.paginate():
 
-        volumes.append({
-            "VolumeId": volume["VolumeId"],
-            "SizeGB": volume["Size"],
-            "State": state
-        })
+        for address in page["Addresses"]:
 
-        if state == "available":
+            associated = "AssociationId" in address
 
-            findings.append({
-                "Resource": volume["VolumeId"],
-                "Type": "EBS",
-                "Issue": "Unattached volume",
-                "Recommendation": "Verify its data and ownership before considering deletion."
+            addresses.append({
+                "PublicIp": address["PublicIp"],
+                "AllocationId": address["AllocationId"],
+                "Associated": associated
             })
 
+            if not associated:
 
-# ==========================================
-# 3. ELASTIC IP AUDIT
-# ==========================================
+                findings.append({
+                    "Resource": address["AllocationId"],
+                    "Type": "Elastic IP",
+                    "Issue": "Unassociated Elastic IP",
+                    "Recommendation": (
+                        "Verify whether this IP is required before releasing it."
+                    )
+                })
 
-response = ec2.describe_addresses()
-
-for address in response["Addresses"]:
-
-    associated = "AssociationId" in address
-
-    addresses.append({
-        "PublicIp": address["PublicIp"],
-        "AllocationId": address["AllocationId"],
-        "Associated": associated
-    })
-
-    if not associated:
-
-        findings.append({
-            "Resource": address["AllocationId"],
-            "Type": "Elastic IP",
-            "Issue": "Unassociated Elastic IP",
-            "Recommendation": "Verify whether this IP is required before releasing it."
-        })
+    print(f"Elastic IP addresses discovered: {len(addresses)}")
 
 
 # ==========================================
-# 4. CLOUDWATCH CPU AUDIT
+# 6. CLOUDWATCH CPU AUDIT
 # ==========================================
 
-end_time = datetime.now(timezone.utc)
-start_time = end_time - timedelta(days=7)
+def audit_cpu():
 
-for instance in instances:
+    print("\nStarting CloudWatch CPU analysis...")
 
-    if instance["State"] != "running":
-        continue
+    end_time = datetime.now(timezone.utc)
 
-    instance_id = instance["InstanceId"]
+    start_time = end_time - timedelta(days=CPU_ANALYSIS_DAYS)
 
-    response = cloudwatch.get_metric_statistics(
-        Namespace="AWS/EC2",
-        MetricName="CPUUtilization",
-        Dimensions=[
-            {
-                "Name": "InstanceId",
-                "Value": instance_id
+    for instance in instances:
+
+        if instance["State"] != "running":
+            continue
+
+        instance_id = instance["InstanceId"]
+
+        try:
+
+            response = cloudwatch.get_metric_statistics(
+
+                Namespace="AWS/EC2",
+
+                MetricName="CPUUtilization",
+
+                Dimensions=[
+                    {
+                        "Name": "InstanceId",
+                        "Value": instance_id
+                    }
+                ],
+
+                StartTime=start_time,
+
+                EndTime=end_time,
+
+                Period=CPU_METRIC_PERIOD,
+
+                Statistics=[
+                    "Average",
+                    "Maximum",
+                    "SampleCount"
+                ]
+            )
+
+            datapoints = response["Datapoints"]
+
+            datapoints.sort(
+                key=lambda point: point["Timestamp"]
+            )
+
+            average_cpu = None
+            maximum_cpu = None
+
+            if datapoints:
+
+                total_samples = sum(
+                    point["SampleCount"]
+                    for point in datapoints
+                )
+
+                if total_samples > 0:
+
+                    average_cpu = sum(
+                        point["Average"] * point["SampleCount"]
+                        for point in datapoints
+                    ) / total_samples
+
+                maximum_cpu = max(
+                    point["Maximum"]
+                    for point in datapoints
+                )
+
+            metric_result = {
+
+                "InstanceId": instance_id,
+
+                "AverageCPUUtilization": (
+                    round(average_cpu, 2)
+                    if average_cpu is not None else None
+                ),
+
+                "MaximumCPUUtilization": (
+                    round(maximum_cpu, 2)
+                    if maximum_cpu is not None else None
+                ),
+
+                "DatapointsAvailable": len(datapoints),
+
+                "AnalysisPeriodDays": CPU_ANALYSIS_DAYS,
+
+                "MetricPeriodSeconds": CPU_METRIC_PERIOD
             }
-        ],
-        StartTime=start_time,
-        EndTime=end_time,
-        Period=86400,
-        Statistics=["Average", "Maximum"]
-    )
 
-    datapoints = response["Datapoints"]
+            cpu_metrics.append(metric_result)
 
-    datapoints.sort(key=lambda x: x["Timestamp"])
+            if len(datapoints) < MIN_CPU_DATAPOINTS:
 
-    if datapoints:
+                print(
+                    f"Insufficient CPU history for {instance_id}: "
+                    f"{len(datapoints)} datapoint(s)"
+                )
 
-        average_cpu = sum(
-            point["Average"] for point in datapoints
-        ) / len(datapoints)
+                continue
 
-        maximum_cpu = max(
-            point["Maximum"] for point in datapoints
-        )
+            if average_cpu is not None and average_cpu < CPU_THRESHOLD:
+
+                findings.append({
+
+                    "Resource": instance_id,
+
+                    "Type": "EC2",
+
+                    "Issue": "Potentially underutilized instance",
+
+                    "AverageCPU": round(average_cpu, 2),
+
+                    "Recommendation": (
+                        "Review CPU, memory, network and application "
+                        "requirements before considering right-sizing."
+                    )
+                })
+
+        except ClientError as error:
+
+            error_message = error.response["Error"]["Message"]
+
+            print(
+                f"CloudWatch error for {instance_id}: {error_message}"
+            )
+
+            cpu_metrics.append({
+
+                "InstanceId": instance_id,
+
+                "Error": error_message
+
+            })
+
+    print(f"CPU metrics collected: {len(cpu_metrics)}")
+
+
+# ==========================================
+# 7. GENERATE SUMMARY
+# ==========================================
+
+def generate_summary():
+
+    summary = {
+
+        "TotalEC2Instances": len(instances),
+
+        "RunningInstances": sum(
+            1 for instance in instances
+            if instance["State"] == "running"
+        ),
+
+        "StoppedInstances": sum(
+            1 for instance in instances
+            if instance["State"] == "stopped"
+        ),
+
+        "TotalEBSVolumes": len(volumes),
+
+        "UnattachedVolumes": sum(
+            1 for volume in volumes
+            if volume["State"] == "available"
+        ),
+
+        "TotalElasticIPs": len(addresses),
+
+        "UnassociatedElasticIPs": sum(
+            1 for address in addresses
+            if not address["Associated"]
+        ),
+
+        "CPUInstancesAnalyzed": sum(
+            1 for metric in cpu_metrics
+            if "Error" not in metric
+        ),
+
+        "PotentialOptimizationFindings": len(findings)
+
+    }
+
+    return summary
+
+
+# ==========================================
+# 8. GENERATE JSON REPORT
+# ==========================================
+
+def generate_report():
+
+    summary = generate_summary()
+
+    report = {
+
+        "AuditTime": datetime.now(timezone.utc).isoformat(),
+
+        "Region": REGION,
+
+        "Configuration": {
+
+            "CPUThreshold": CPU_THRESHOLD,
+
+            "MinimumDatapoints": MIN_CPU_DATAPOINTS,
+
+            "AnalysisPeriodDays": CPU_ANALYSIS_DAYS,
+
+            "MetricPeriodSeconds": CPU_METRIC_PERIOD
+
+        },
+
+        "Summary": summary,
+
+        "EC2Instances": instances,
+
+        "EBSVolumes": volumes,
+
+        "ElasticIPs": addresses,
+
+        "CloudWatchCPUMetrics": cpu_metrics,
+
+        "OptimizationFindings": findings
+
+    }
+
+    with open("audit_report.json", "w", encoding="utf-8") as file:
+
+        json.dump(report, file, indent=4)
+
+    return summary
+
+
+# ==========================================
+# 9. DISPLAY RESULTS
+# ==========================================
+
+def display_results(summary):
+
+    print("\n========== AWS COST OPTIMIZATION AUDIT ==========")
+
+    print(json.dumps(summary, indent=4))
+
+    print("\n========== CLOUDWATCH CPU METRICS ==========")
+
+    print(json.dumps(cpu_metrics, indent=4))
+
+    print("\n========== OPTIMIZATION FINDINGS ==========")
+
+    if findings:
+
+        for finding in findings:
+
+            print(f"\nResource: {finding['Resource']}")
+
+            print(f"Type: {finding['Type']}")
+
+            print(f"Issue: {finding['Issue']}")
+
+            print(f"Recommendation: {finding['Recommendation']}")
 
     else:
-        average_cpu = None
-        maximum_cpu = None
 
-    cpu_metrics.append({
-        "InstanceId": instance_id,
-        "AverageCPUUtilization": round(average_cpu, 2)
-            if average_cpu is not None else None,
-        "MaximumCPUUtilization": round(maximum_cpu, 2)
-            if maximum_cpu is not None else None,
-        "DatapointsAvailable": len(datapoints)
-    })
+        print("No potential optimization findings detected.")
 
-    if len(datapoints) < MIN_CPU_DATAPOINTS:
-
-        print(
-            f"Insufficient CPU history for {instance_id}: "
-            f"{len(datapoints)} datapoint(s)"
-        )
-
-    elif average_cpu < CPU_THRESHOLD:
-
-        findings.append({
-            "Resource": instance_id,
-            "Type": "EC2",
-            "Issue": "Potentially underutilized instance",
-            "AverageCPU": round(average_cpu, 2),
-            "Recommendation": (
-                "Review instance utilization and consider right-sizing "
-                "if memory, network and application requirements also permit."
-            )
-        })
+    print("\nAudit report saved as audit_report.json")
 
 
 # ==========================================
-# 5. GENERATE SUMMARY
+# 10. MAIN EXECUTION
 # ==========================================
 
-summary = {
+def main():
 
-    "TotalEC2Instances": len(instances),
+    try:
 
-    "RunningInstances": sum(
-        1 for i in instances if i["State"] == "running"
-    ),
+        print("\nStarting AWS Resource Audit...")
 
-    "StoppedInstances": sum(
-        1 for i in instances if i["State"] == "stopped"
-    ),
+        print(f"Region: {REGION}")
 
-    "TotalEBSVolumes": len(volumes),
+        audit_ec2()
 
-    "UnattachedVolumes": sum(
-        1 for v in volumes if v["State"] == "available"
-    ),
+        audit_ebs()
 
-    "TotalElasticIPs": len(addresses),
+        audit_elastic_ips()
 
-    "UnassociatedElasticIPs": sum(
-        1 for a in addresses if not a["Associated"]
-    ),
+        audit_cpu()
 
-    "CPUInstancesAnalyzed": len(cpu_metrics),
+        summary = generate_report()
 
-    "PotentialOptimizationFindings": len(findings)
-}
+        display_results(summary)
 
+    except (ClientError, BotoCoreError) as error:
 
-# ==========================================
-# 6. CREATE AUDIT REPORT
-# ==========================================
+        print("\nAWS API ERROR:")
 
-report = {
+        print(error)
 
-    "AuditTime": datetime.now(timezone.utc).isoformat(),
+    except OSError as error:
 
-    "Region": REGION,
+        print("\nFILE ERROR:")
 
-    "Summary": summary,
-
-    "EC2Instances": instances,
-
-    "EBSVolumes": volumes,
-
-    "ElasticIPs": addresses,
-
-    "CloudWatchCPUMetrics": cpu_metrics,
-
-    "OptimizationFindings": findings
-}
+        print(error)
 
 
-# ==========================================
-# 7. SAVE JSON REPORT
-# ==========================================
+if __name__ == "__main__":
 
-with open("audit_report.json", "w") as file:
-
-    json.dump(report, file, indent=4)
-
-
-# ==========================================
-# 8. DISPLAY RESULTS
-# ==========================================
-
-print("\n========== AWS COST OPTIMIZATION AUDIT ==========")
-
-print(json.dumps(summary, indent=4))
-
-
-print("\n========== CLOUDWATCH CPU METRICS ==========")
-
-print(json.dumps(cpu_metrics, indent=4))
-
-
-print("\n========== OPTIMIZATION FINDINGS ==========")
-
-if findings:
-
-    for finding in findings:
-
-        print(f"\nResource: {finding['Resource']}")
-        print(f"Type: {finding['Type']}")
-        print(f"Issue: {finding['Issue']}")
-        print(f"Recommendation: {finding['Recommendation']}")
-
-else:
-
-    print("No potential optimization findings detected.")
-
-
-print("\nAudit report saved as audit_report.json")
+    main()
