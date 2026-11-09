@@ -1,54 +1,37 @@
 # AWS Cost Optimization & Resource Audit Tool
 
-## Project Overview
+A Python-based AWS auditing tool built with **Boto3** to identify potentially unused resources, analyze EC2 CPU utilization, and generate JSON-based optimization reports.
 
-The AWS Cost Optimization & Resource Audit Tool is a Python-based automation project that uses **Boto3** to inspect AWS resources, identify potential resource wastage, and generate an audit report in JSON format.
+## Overview
 
-The project focuses on identifying resources that may create unnecessary AWS costs and providing recommendations for optimization.
+Manually identifying unused AWS resources can be time-consuming and may lead to unnecessary infrastructure costs.
 
-## Problem Statement
-
-Unused or underutilized AWS resources can increase cloud infrastructure expenses.
-
-Manually checking EC2 instances, EBS volumes, Elastic IP addresses, and resource utilization can be time-consuming.
-
-This project automates basic resource auditing and identifies potential optimization opportunities.
+This project automates resource discovery and monitoring to identify potential optimization opportunities without automatically modifying or deleting AWS resources.
 
 ## Features
 
-- **EC2 Audit:** Identifies EC2 instances and their current states.
-- **EBS Audit:** Identifies unattached EBS volumes.
-- **Elastic IP Audit:** Detects unassociated Elastic IP addresses.
-- **CloudWatch Integration:** Retrieves EC2 CPU utilization metrics.
-- **Resource Analysis:** Identifies potential optimization opportunities.
-- **JSON Reporting:** Automatically generates an audit report.
-- **Safe Recommendations:** Provides recommendations without automatically deleting or modifying resources.
-
-## Technologies Used
-
-- Python 3.11
-- Boto3
-- AWS EC2
-- Amazon EBS
-- AWS Elastic IP
-- Amazon CloudWatch
-- AWS IAM
-- AWS CLI
-- JSON
+- **EC2 Audit:** Identifies instances and their current states.
+- **EBS Audit:** Detects unattached EBS volumes.
+- **Elastic IP Audit:** Identifies unassociated Elastic IP addresses.
+- **CloudWatch Integration:** Retrieves EC2 CPU utilization metrics over seven days.
+- **Resource Analysis:** Flags stopped instances and potentially underutilized instances.
+- **JSON Reporting:** Generates structured audit reports.
+- **Safe Recommendations:** Provides recommendations without modifying AWS resources.
+- **Error Handling:** Handles AWS API and file operation errors.
 
 ## Architecture
 
 ```mermaid
 flowchart TD
-    A[Python 3.11 Audit Script] --> B[Boto3 SDK]
+    A[Python Audit Script] --> B[Boto3 SDK]
     B --> C[Amazon EC2 APIs]
-    B --> D[Amazon CloudWatch API]
+    B --> D[Amazon CloudWatch]
 
-    C --> E[EC2 Instance Audit]
-    C --> F[EBS Volume Audit]
+    C --> E[EC2 Audit]
+    C --> F[EBS Audit]
     C --> G[Elastic IP Audit]
 
-    D --> H[CPU Utilization Analysis]
+    D --> H[CPU Analysis]
 
     E --> I[Resource Analysis]
     F --> I
@@ -59,58 +42,72 @@ flowchart TD
     J --> K[JSON Audit Report]
 ```
 
+## Technologies
+
+- Python 3.11
+- Boto3
+- Amazon EC2
+- Amazon EBS
+- Amazon CloudWatch
+- AWS IAM
+- AWS CLI
+- JSON
+
 ## Project Structure
 
 ```text
 aws-cost-optimization/
-│
 ├── resource_audit.py
 ├── requirements.txt
 ├── README.md
 ├── .gitignore
-│
 └── audit_report.json  # Generated locally; excluded from Git
 ```
 
 ## Prerequisites
 
-1. Python 3.11 or later.
-2. An AWS account.
-3. AWS CLI configured or an EC2 IAM role.
-4. Appropriate read-only IAM permissions.
+- Python 3.11 or later
+- AWS account
+- AWS CLI configured or an EC2 IAM role
+- Appropriate read-only IAM permissions
 
 ### Required IAM Permissions
 
-The IAM identity running the script requires these permissions:
+```json
+{
+  "Effect": "Allow",
+  "Action": [
+    "ec2:DescribeInstances",
+    "ec2:DescribeVolumes",
+    "ec2:DescribeAddresses",
+    "cloudwatch:GetMetricStatistics"
+  ],
+  "Resource": "*"
+}
+```
 
-**EC2:**
-- `ec2:DescribeInstances`
-- `ec2:DescribeVolumes`
-- `ec2:DescribeAddresses`
+## Installation
 
-**CloudWatch:**
-- `cloudwatch:GetMetricStatistics`
-- `cloudwatch:ListMetrics`
-- `cloudwatch:GetMetricData`
-
-These permissions allow the application to inspect resources and retrieve monitoring metrics.
-
-## Installation and Execution
-
-### 1. Clone the repository
+**1. Clone the repository**
 
 ```bash
 git clone <YOUR_GITHUB_REPOSITORY_URL>
 cd aws-cost-optimization
 ```
 
-### 2. Create a virtual environment
+**2. Create a virtual environment**
 
 ```bash
 python3.11 -m venv venv
 ```
 
-### 3. Activate the environment
+Windows:
+
+```powershell
+py -3.11 -m venv venv
+```
+
+**3. Activate the environment**
 
 Linux:
 
@@ -118,94 +115,94 @@ Linux:
 source venv/bin/activate
 ```
 
-### 4. Install dependencies
+Windows:
+
+```powershell
+.\venv\Scripts\Activate.ps1
+```
+
+**4. Install dependencies**
 
 ```bash
 pip install -r requirements.txt
 ```
 
-### 5. Configure AWS access
-
-Use an IAM role attached to your EC2 instance or configure AWS CLI credentials securely.
-
-Verify access:
+**5. Configure AWS credentials**
 
 ```bash
+aws configure
 aws sts get-caller-identity
 ```
 
-### 6. Run the audit
+Alternatively, use an IAM role attached to an EC2 instance.
+
+**6. Run the audit**
 
 ```bash
 python resource_audit.py
 ```
 
-The application retrieves AWS resource information, analyzes CPU metrics, identifies potential optimization findings, and generates:
-
-```text
-audit_report.json
-```
+The application generates `audit_report.json` containing resource information, CPU metrics, summary statistics, and optimization findings.
 
 ## CloudWatch CPU Analysis
 
-The application retrieves the following EC2 CPU metrics:
+The application analyzes EC2 CPU utilization using the following configuration:
 
-- Average CPU utilization.
-- Maximum CPU utilization.
-- Number of available datapoints.
+| Parameter | Value |
+|---|---|
+| Analysis period | 7 days |
+| Metric | CPUUtilization |
+| Metric period | 86400 seconds |
+| Minimum datapoints | 3 |
+| CPU threshold | 10% |
 
-The application checks CPU history over a seven-day period.
+It collects Average, Maximum, and SampleCount statistics.
 
-A minimum of three datapoints is required before evaluating an instance against the configured CPU threshold.
+A sample-weighted average is calculated using the available datapoints. Instances with fewer than three datapoints are reported as having insufficient monitoring history.
 
-If insufficient monitoring data is available, the application reports this instead of making an unreliable underutilization recommendation.
+Low CPU utilization alone does not establish that an instance is unnecessary. Memory, network, and application requirements should also be reviewed before right-sizing.
 
 ## Optimization Findings
 
-The application currently identifies:
-
 | Resource | Condition | Recommendation |
 |---|---|---|
-| EC2 | Stopped instance | Review whether the instance is still required. |
-| EBS | Unattached volume | Verify its data and ownership before considering deletion. |
-| Elastic IP | Unassociated address | Verify whether the IP is required before releasing it. |
-| EC2 | Potentially low CPU utilization | Review CPU, memory, network, and application requirements before right-sizing. |
+| EC2 | Stopped instance | Review whether it is still required. |
+| EBS | Unattached volume | Verify data and ownership before deletion. |
+| Elastic IP | Unassociated address | Verify requirements before releasing. |
+| EC2 | Potentially low CPU | Review utilization before right-sizing. |
 
-The application provides recommendations only. It does not automatically terminate instances, delete volumes, or release Elastic IP addresses.
+## Security
 
-## Security Considerations
-
-- Uses IAM permissions instead of hardcoding AWS credentials.
-- Uses read-only AWS API permissions for resource auditing.
+- Uses Boto3's standard credential provider chain.
+- Avoids hardcoded AWS credentials.
+- Uses read-only AWS API permissions.
+- Does not automatically delete or modify resources.
 - Excludes virtual environments and generated reports from Git.
-- Does not automatically modify or delete AWS resources.
 
 ## Current Limitations
 
-- CPU analysis depends on available CloudWatch datapoints.
-- CPU utilization alone cannot determine whether an instance is underutilized.
-- The project currently focuses on EC2, EBS, Elastic IP, and CPU metrics.
-- Recommendations require manual verification before taking action.
+- Audits one AWS region per execution.
+- Focuses on EC2, EBS, Elastic IP, and CPU metrics.
+- Does not calculate actual billing savings.
+- CPU utilization alone cannot establish underutilization.
+- Findings require manual verification.
 
 ## Future Enhancements
 
 - AWS Cost Explorer integration.
-- Automated notifications using Amazon SNS.
-- Scheduled audits using AWS Lambda and EventBridge.
-- Infrastructure provisioning using Terraform.
-- CI/CD integration using GitHub Actions.
+- SNS notifications.
+- Scheduled audits using Lambda and EventBridge.
+- Terraform infrastructure provisioning.
+- GitHub Actions CI/CD integration.
 
 ## Learning Outcomes
 
-Through this project, I gained practical experience with:
-
-- Automating AWS resource auditing using Python and Boto3.
-- Interacting with AWS services through SDK APIs.
-- Understanding EC2, EBS, and Elastic IP resources.
-- Retrieving and analyzing CloudWatch metrics.
-- Working with IAM permissions and roles.
-- Generating structured JSON reports.
-- Identifying potential AWS cost optimization opportunities.
+- AWS resource auditing using Python and Boto3.
+- EC2, EBS, and Elastic IP management APIs.
+- CloudWatch metric retrieval and analysis.
+- IAM permissions and AWS authentication.
+- AWS API pagination and error handling.
+- JSON report generation.
 
 ## Author
 
